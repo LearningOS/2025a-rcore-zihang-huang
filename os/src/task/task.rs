@@ -6,6 +6,9 @@ use crate::mm::{
 };
 use crate::trap::{trap_handler, TrapContext};
 
+/// Maximum syscall ID we support for counting
+const MAX_SYSCALL_NUM: usize = 512;
+
 /// The task control block (TCB) of a task.
 pub struct TaskControlBlock {
     /// Save task context
@@ -28,6 +31,9 @@ pub struct TaskControlBlock {
 
     /// Program break
     pub program_brk: usize,
+
+    /// Syscall counter - tracks number of times each syscall was invoked
+    pub syscall_count: [u32; MAX_SYSCALL_NUM],
 }
 
 impl TaskControlBlock {
@@ -63,6 +69,7 @@ impl TaskControlBlock {
             base_size: user_sp,
             heap_bottom: user_sp,
             program_brk: user_sp,
+            syscall_count: [0; MAX_SYSCALL_NUM],
         };
         // prepare TrapContext in user space
         let trap_cx = task_control_block.get_trap_cx();
