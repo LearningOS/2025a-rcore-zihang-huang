@@ -115,3 +115,27 @@ lazy_static! {
 pub fn add_initproc() {
     add_task(INITPROC.clone());
 }
+
+/// Increment syscall count for current task
+pub fn increment_syscall_count(syscall_id: usize) {
+    if let Some(task) = current_task() {
+        let mut inner = task.inner_exclusive_access();
+        if syscall_id < 512 {
+            inner.syscall_count[syscall_id] += 1;
+        }
+    }
+}
+
+/// Get syscall count for current task
+pub fn get_syscall_count(syscall_id: usize) -> u32 {
+    if let Some(task) = current_task() {
+        let inner = task.inner_exclusive_access();
+        if syscall_id < 512 {
+            inner.syscall_count[syscall_id]
+        } else {
+            0
+        }
+    } else {
+        0
+    }
+}

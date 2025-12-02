@@ -3,10 +3,10 @@ use alloc::sync::Arc;
 
 use crate::{
     loader::get_app_data_by_name,
-    mm::{translated_refmut, translated_str},
+    mm::{translated_refmut, translated_str, translated_byte_buffer, PageTable, VirtAddr, VirtPageNum},
     task::{
         add_task, current_task, current_user_token, exit_current_and_run_next,
-        suspend_current_and_run_next,
+        suspend_current_and_run_next, get_syscall_count,
     },
 };
 
@@ -118,7 +118,6 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
 
     // We need to write the TimeVal struct to user space
     // Handle potential page boundary crossing
-    use crate::mm::translated_byte_buffer;
     use core::slice;
 
     let timeval_bytes = unsafe {
@@ -240,6 +239,59 @@ pub fn sys_munmap(start: usize, len: usize) -> isize {
     inner.memory_set.remove_area_with_start_vpn(start_vpn);
 
     0
+}
+
+/// TODO: Finish sys_trace to pass testcases
+/// HINT: You might reimplement it with virtual memory management.
+pub fn sys_trace(trace_request: usize, id: usize, data: usize) -> isize {
+    trace!("kernel: sys_trace");
+    match trace_request {
+        0 => {
+            // Read
+            let addr = id;
+            let token = current_user_token();
+            let page_table = PageTable::from_token(token);
+            let va = VirtAddr::from(addr);
+            let vpn: VirtPageNum = va.floor();
+
+            if let Some(pte) = page_table.translate(vpn) {
+                if pte.is_valid() && pte.readable() && (pte.flags() & crate::mm::PTEFlags::U) != crate::mm::PTEFlags::empty() {
+                    let ppn = pte.ppn();
+                    let offset = va.page_offset();
+                    let byte = ppn.get_bytes_array()[offset];
+                    return byte as isize;
+                }
+            }
+            -1
+        }
+        1 => {
+            // Write
+            let addr = id;
+            let token = current_user_token();
+            let page_table = PageTable::from_token(token);
+            let va = VirtAddr::from(addr);
+            let vpn: VirtPageNum = va.floor();
+
+            if let Some(pte) = page_table.translate(vpn) {
+                if pte.is_valid() && pte.writable() && (pte.flags() & crate::mm::PTEFlags::U) != crate::mm::PTEFlags::empty() {
+                    let ppn = pte.ppn();
+                    let offset = va.page_offset();
+                    ppn.get_bytes_array()[offset] = data as u8;
+                    return 0;
+                }
+            }
+            -1
+        }
+        2 => {
+            // Syscall counting
+            let syscall_id = id;
+            get_syscall_count(syscall_id) as isize
+        }
+        _ => {
+            // Other requests
+            -1
+        }
+    }
 }
 
 /// change data segment size
