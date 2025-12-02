@@ -68,6 +68,12 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// Priority for stride scheduling (must be >= 2)
+    pub priority: usize,
+
+    /// Stride value for stride scheduling
+    pub stride: usize,
 }
 
 impl TaskControlBlockInner {
@@ -118,6 +124,8 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    priority: 16,  // Initial priority
+                    stride: 0,     // Initial stride
                 })
             },
         };
@@ -191,6 +199,8 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    priority: parent_inner.priority,  // Inherit priority from parent
+                    stride: 0,                        // Reset stride for new process
                 })
             },
         });
