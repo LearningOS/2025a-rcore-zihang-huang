@@ -11,6 +11,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefMut;
 
+/// Maximum syscall ID we support for counting
+const MAX_SYSCALL_NUM: usize = 512;
+
 /// Task control block structure
 ///
 /// Directly save the contents that will not change during running
@@ -77,6 +80,9 @@ pub struct TaskControlBlockInner {
 
     /// Stride value for stride scheduling
     pub stride: usize,
+
+    /// Syscall counter - tracks number of times each syscall was invoked
+    pub syscall_count: [u32; MAX_SYSCALL_NUM],
 }
 
 impl TaskControlBlockInner {
@@ -143,6 +149,7 @@ impl TaskControlBlock {
                     program_brk: user_sp,
                     priority: 16,  // Initial priority
                     stride: 0,     // Initial stride
+                    syscall_count: [0; MAX_SYSCALL_NUM],
                 })
             },
         };
@@ -226,6 +233,7 @@ impl TaskControlBlock {
                     program_brk: parent_inner.program_brk,
                     priority: parent_inner.priority,  // Inherit priority from parent
                     stride: 0,                        // Reset stride for new process
+                    syscall_count: [0; MAX_SYSCALL_NUM],  // Reset syscall count for new process
                 })
             },
         });
