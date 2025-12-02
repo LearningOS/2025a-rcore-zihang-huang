@@ -4,7 +4,6 @@ use alloc::sync::Arc;
 
 use crate::{
     fs::{open_file, OpenFlags},
-    loader::get_app_data_by_name,
     mm::{translated_refmut, translated_str, translated_byte_buffer, PageTable, VirtAddr, VirtPageNum},
     task::{
         add_task, current_task, current_user_token, exit_current_and_run_next,
@@ -314,11 +313,12 @@ pub fn sys_spawn(path: *const u8) -> isize {
     let token = current_user_token();
     let path = translated_str(token, path);
 
-    if let Some(data) = get_app_data_by_name(path.as_str()) {
+    if let Some(inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
+        let data = inode.read_all();
         let current = current_task().unwrap();
         // Create a new task directly from the ELF data
         // Unlike fork, we don't copy the parent's address space
-        let new_task = Arc::new(crate::task::TaskControlBlock::new(data));
+        let new_task = Arc::new(crate::task::TaskControlBlock::new(data.as_slice()));
         let new_pid = new_task.pid.0;
 
         // Set parent relationship
