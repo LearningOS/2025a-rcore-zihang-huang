@@ -9,6 +9,7 @@ use crate::fs::{File, Stdin, Stdout};
 use crate::mm::{translated_refmut, MemorySet, KERNEL_SPACE};
 use crate::sync::{Condvar, Mutex, Semaphore, UPSafeCell};
 use crate::trap::{trap_handler, TrapContext};
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
@@ -49,6 +50,11 @@ pub struct ProcessControlBlockInner {
     pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
+    /// for deadlock detection
+    pub needed_mutexes: BTreeMap<usize, BTreeSet<usize>>,
+    pub needed_semaphores: BTreeMap<usize, BTreeSet<usize>>,
+    /// deadlock detection enabled
+    pub deadlock_detect_enabled: bool,
 }
 
 impl ProcessControlBlockInner {
@@ -119,6 +125,9 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    needed_mutexes: BTreeMap::new(),
+                    needed_semaphores: BTreeMap::new(),
+                    deadlock_detect_enabled: false,
                 })
             },
         });
@@ -245,6 +254,9 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    needed_mutexes: parent.needed_mutexes.clone(),
+                    needed_semaphores: parent.needed_semaphores.clone(),
+                    deadlock_detect_enabled: parent.deadlock_detect_enabled,
                 })
             },
         });
@@ -281,5 +293,171 @@ impl ProcessControlBlock {
     /// get pid
     pub fn getpid(&self) -> usize {
         self.pid.0
+    }
+
+    pub fn enable_deadlock_detect(&self, is_enable: bool) {
+        let mut inner = self.inner_exclusive_access();
+        inner.deadlock_detect_enabled = is_enable;
+    }
+
+    pub fn check_deadlock(
+        &self,
+        req_mutex_idx: Option<usize>,
+        req_sem_idx: Option<usize>,
+        req_tid: usize,
+    ) -> bool {
+        let inner = self.inner_exclusive_access();
+        if !inner.deadlock_detect_enabled {
+            return false;
+        }
+
+        let mut available_mutex = Vec::new();
+        let mut available_sem = Vec::new();
+        let mut alloc_mutex: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        let mut alloc_sem: BTreeMap<usize, BTreeMap<usize, usize>> = BTreeMap::new();
+        let mut needed_mutexes: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+        let mut needed_semaphores: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+
+        // 1. Snapshot Mutex
+        for (i, mutex) in inner.mutex_list.iter().enumerate() {
+            if let Some(m) = mutex {
+                if let Some(owner) = m.get_owner() {
+                    available_mutex.push(false);
+                    alloc_mutex.entry(owner).or_default().push(i);
+                } else {
+                    available_mutex.push(true);
+                }
+                for waiting_tid in m.get_waiting_tids() {
+                    needed_mutexes.entry(waiting_tid).or_default().insert(i);
+                }
+            } else {
+                available_mutex.push(false);
+            }
+        }
+
+        // 2. Snapshot Semaphore
+        for (i, sem) in inner.semaphore_list.iter().enumerate() {
+            if let Some(s) = sem {
+                let s_inner = s.inner.exclusive_access();
+                available_sem.push(s_inner.count.max(0));
+                for (tid, count) in s_inner.sem_ownership.iter() {
+                    if *count > 0 {
+                        alloc_sem.entry(*tid).or_default().insert(i, *count);
+                    }
+                }
+                for waiting_task in s_inner.wait_queue.iter() {
+                    let tid = waiting_task.inner_exclusive_access().res.as_ref().unwrap().tid;
+                    needed_semaphores.entry(tid).or_default().insert(i);
+                }
+            } else {
+                available_sem.push(0);
+            }
+        }
+
+        // 3. Inject Request
+        if let Some(m) = req_mutex_idx {
+            if m < available_mutex.len() && available_mutex[m] {
+                available_mutex[m] = false;
+                alloc_mutex.entry(req_tid).or_default().push(m);
+            } else {
+                needed_mutexes.entry(req_tid).or_default().insert(m);
+            }
+        }
+        if let Some(s) = req_sem_idx {
+            if s < available_sem.len() && available_sem[s] > 0 {
+                available_sem[s] -= 1;
+                *alloc_sem.entry(req_tid).or_default().entry(s).or_default() += 1;
+            } else {
+                needed_semaphores.entry(req_tid).or_default().insert(s);
+            }
+        }
+
+        // 4. Banker's Algorithm
+        let mut finish = BTreeMap::new();
+        let mut all_tids = BTreeSet::new();
+        for t in inner.tasks.iter().flatten() {
+            if let Some(res) = &t.inner_exclusive_access().res {
+                all_tids.insert(res.tid);
+            }
+        }
+        all_tids.insert(req_tid);
+
+        // DEBUG PRINTS
+        /*
+        println!("Check Deadlock: ReqTid={}", req_tid);
+        println!("Available: {:?}", available_sem);
+        println!("Alloc: {:?}", alloc_sem);
+        println!("Needed Mutexes: {:?}", needed_mutexes);
+        println!("Needed Semaphores: {:?}", needed_semaphores);
+        */
+
+
+        for tid in &all_tids {
+            finish.insert(*tid, false);
+        }
+
+        // DEBUG
+        if req_sem_idx.is_some() {
+             println!("CheckDeadlock: ReqTid={} AllTids={:?} AllocSemKeys={:?}", req_tid, all_tids, alloc_sem.keys());
+             if let Some(s0_alloc) = alloc_sem.get(&0) {
+                 println!("  Main(0) holds: {:?}", s0_alloc);
+             } else {
+                 println!("  Main(0) holds NOTHING");
+             }
+        }
+
+        loop {
+            let mut progress = false;
+            for &tid in &all_tids {
+                if !finish[&tid] {
+                    // Check Need <= Work
+                    let mut can_finish = true;
+                    if let Some(needed_m) = needed_mutexes.get(&tid) {
+                        for &m_id in needed_m {
+                            if !available_mutex[m_id] {
+                                can_finish = false;
+                                break;
+                            }
+                        }
+                    }
+                    if can_finish {
+                        if let Some(needed_s) = needed_semaphores.get(&tid) {
+                            for &s_id in needed_s {
+                                if available_sem[s_id] <= 0 {
+                                    can_finish = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if can_finish {
+                        // Release resources
+                        if let Some(held_mutexes) = alloc_mutex.get(&tid) {
+                            for &m in held_mutexes {
+                                available_mutex[m] = true;
+                            }
+                        }
+                        if let Some(held_sems) = alloc_sem.get(&tid) {
+                            for (&s, &count) in held_sems {
+                                available_sem[s] += count as isize;
+                            }
+                        }
+                        finish.insert(tid, true);
+                        progress = true;
+                    }
+                }
+            }
+            if !progress {
+                break;
+            }
+        }
+
+        for &tid in &all_tids {
+            if !finish[&tid] {
+                return true;
+            }
+        }
+        false
     }
 }
